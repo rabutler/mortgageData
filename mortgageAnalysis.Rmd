@@ -1,0 +1,142 @@
+---
+output:
+  md_document
+author: "Alan Butler"
+date: "December 15, 2015"
+layout: page
+subheadline:  "A quick analysis of historical mortgage interest rates"
+title:  "Historical Changes in Mortgage Rates"
+teaser: ""
+header: no
+add_ggvis: true
+permalink: "/test/"
+---
+
+This post provides an example of incorporating static ggvis figures in a blog post, using a real, albeit simplistic, analysis. The post describing how to incorporate static ggvis figures is available [here](www.sample.com)
+
+## Background
+My mom is getting ready to sell her house and by a new house, and has some concerns about how much interest rates may go up before she can buy a house. I really don't know much about these things, so I performed a Quick analysis of historical changes in mortgage rates to see how much they _could_ go up over the next few months. There is nothing fancy here, no model fitting, just looking at the fastest they have changed over several months historically and using that to come up with a worst case change for the next few months.
+
+__I am not a financial analyst, and I understand there is no way for a mortal like myself to predict how interest rates will change in the next few months. I also understand there are many, many factors that lead to these changes, but will not even pretend to understand what they are. This is only an analysis of historical changes.__
+
+## Data
+[Freddie Mac]('http://www.freddiemac.com/pmms/pmms30.htm') provides historical data on their website and in Excel format. Both the website and excel file are in formats that are not conducive to analysis. So, I decided to get some practice with the `rvest` package and grab the data straight from the table on the website since it was going to take the same amount of reformatting as using the Excel files. 
+
+I chose to use only the 30-year fixed rate data, as that is the type of mortgage she will use.
+
+It is super easy to read in the data from the table once you figure out the correct css selector (see the `rvest` selector gadget vignette).
+
+_Note that these next two code chucks are not evaluated everytime, since at the end, I save the data. No use reading the html everytime._
+```{r, eval=FALSE}
+library(lubridate) 
+library(rvest) 
+library(reshape2)
+library(dplyr)
+
+ws <- 'http://www.freddiemac.com/pmms/pmms30.htm'
+cssSelector <- 'tbody+ tbody td'
+
+# read full website
+wsHtml <- read_html(ws)
+# there are 11 columns on the website including the month labels
+wsNcol <- 11
+
+# parse table
+mtg <- wsHtml %>% 
+  rvest::html_nodes(cssSelector) %>%
+  rvest::html_text() %>% matrix(ncol = wsNcol, byrow = T)
+```
+
+`mtg` now looks like the table on the website, but we want to get it in a long table format. We know that new years start every 13 rows; we also know that the current year is the first year of data and 1971 is the last year of data. So we cleaned the data up a little bit, removing the "points" data since we only care about the interest rates, removing the annual averages, and ensuring the dates are end of month format.
+
+```{r, eval=FALSE}
+# drop the pts, which is every second column
+mtg <- mtg[,-seq(3,ncol(mtg),2)]
+# loop over every 13 rows and cbind them to the original data to create a matrix of 
+# months x years
+tmpMtg <- mtg[1:13,]
+mtg <- mtg[-(1:13),]
+for(i in 1:(nrow(mtg)/13)){
+  tmpMtg <- cbind(tmpMtg,mtg[1:13,2:ncol(mtg)])
+  mtg <- mtg[-(1:13),]
+}
+
+# remove the annual average row, and the months as a column of data
+mtg <- tmpMtg[1:12,2:ncol(tmpMtg)]
+rownames(mtg) <- 1:12 # january - december
+colnames(mtg) <- 2015:1971 # should probably make this so it is not hard coded
+rm(tmpMtg)
+
+# melt to long format and make month-year into single variable
+mtg <- mtg %>% reshape2::melt(varnames = c('month','year'), value.name = 'rate') %>%
+  dplyr::mutate(yearMon = paste(year,month,'01',sep = '-')) %>% 
+  dplyr::select(one_of('yearMon','rate'))
+
+# a quick funtion to convert from beginning-of-month dates to end-of-months dates
+last_day <- function(date) {
+  ceiling_date(date, "month") + months(1) - days(1)
+}
+mtg$rate <- as.numeric(as.character(mtg$rate))
+mtg$yearMon <- last_day(lubridate::ymd(mtg$yearMon))
+
+# remove na's from data, and then arrange from oldest to newest
+mtg <- mtg %>% filter(!is.na(rate)) %>% arrange(yearMon)
+
+# and save the data so I don't have to load it from the web every time
+save(mtg, file = 'mortgageData.RData')
+```
+
+
+## Analysis
+
+The main goal was to answer the question: at worst, how much could interest rates increase over the next 1-6 months? 
+
+But what good analysis doesn't start with a simple plot of the data?
+
+```{r, echo=FALSE, warning=FALSE}
+library(ggvis)
+load('mortgageData.RData')
+mtg %>% ggvis(~yearMon, ~rate) %>% layer_lines() %>% 
+  scale_datetime('x', nice = 'month') %>% add_axis('x', title = 'Date') %>%
+  add_axis('y', title = 'Rate [%]')
+```
+
+To answer the question, we used the historical data to see how much the interest rates could change in 1 to 6 months. We decided to check increases and decreases; the logic here is that if rates have fallen that fast in a set time period, then they _could_ rise that fast in the same period. Maybe?
+
+The `findMaxChange` function to compute the biggest changes in a given period:
+```{r, echo = TRUE}
+source('computationFunctions.R')
+findMaxChange
+```
+We called this for 1-6 months, and formatted the results to play nicely with plotting.
+```{r}
+maxChange <- abs(simplify2array(lapply(1:6, findMaxChange, mtg$rate)))
+colnames(maxChange) <- 1:6
+rownames(maxChange) <- c('Biggest Decrease','Biggest Increase')
+maxChange <- maxChange %>% 
+  reshape2::melt(varnames = c('change','nMonths')) 
+```
+A plot of the largest increases and decreases in interest rates for 1-6 months:
+```{r, echo = FALSE}
+maxChange %>% ggvis(~factor(nMonths), ~value, fill = ~change) %>%
+  layer_points(size := 70) %>% add_axis('y', title = 'Change in Interest Rates [%]') %>%
+  add_axis('x', title = "Number of Months") %>%
+  add_legend('fill', title = "Change in Rates")
+```
+
+This provides a worst case for the change in interest rates for 1-6 months into the future, but I wanted a little bit more information about the magnitudes of change. So  `findMaxChange` was modified a little bit so that it returns the entire vector of results instead of the range. 
+
+Now we can plot a distribution of change in interest rates for each number of months to find out a little bit more information about the magnitudes of change we may see in these next few months.
+
+```{r, warning=FALSE}
+allChange <- do.call(rbind,lapply(1:6, findChange, mtg$rate))
+allChange %>% ggvis(~nMonths, ~value) %>% 
+  layer_boxplots(width = .75) %>% 
+  add_axis("x", values = 1:6, title = "Number of Months", format = 'd') %>%
+  add_axis('y',title = "Change in Interest Rate [%]")
+```
+
+## Conclusion
+
+For 2-5 months out, the biggest increases (and decreases) in mortgage rates have been between 3.25 and 4.25%. Going out to 6 months, the biggest increase was over 4.5%. When looking at the range, for all months, the IQR is within +/- 0.5%. So, given my mom's ideal purchase date is the end-of-March, we need interest rates to hold steady for 3 months (the data start with end-of-November, and you would lock your rate in by the end-of-February). Based on the historical data, I think we have a fairly good chance of that happening, but the worst case is that we'd see mortgage rates go up to 7.5-8.0%.  Hopefully the worst case does not play out, though the Feds raised interest last month...
+
